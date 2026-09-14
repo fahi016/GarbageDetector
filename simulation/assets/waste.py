@@ -1,19 +1,105 @@
-"""Original primitive waste objects (bottles, cans, bags, cardboard, containers)."""
+"""Realistic multi-part waste objects (bottles, cans, bags, cardboard, containers).
+
+Each waste type is built from several primitive MuJoCo geoms (a "part list")
+instead of one bare cuboid/cylinder, so it actually reads as that object from
+the virtual camera. Every geom still doubles as real collision geometry, so
+the gripper interacts with genuine per-part shapes for free.
+
+Per-instance variety (size, rotation, position, and accent colors) is driven
+by a seeded RNG so scenarios stay reproducible. The *dominant* ("base") color
+of each type is kept inside that type's existing HSV detection window in
+`waste_robot/detector.py` so the color-based mock detector keeps working
+unmodified; only the small accent parts (caps, labels, rims, lids, tape) get
+freely randomized colors for visual realism.
+"""
 
 from __future__ import annotations
 
+import colorsys
 from dataclasses import dataclass
 
 import numpy as np
 
 
+# hue_range is normalized 0..1 (matches colorsys), chosen to land inside the
+# corresponding OpenCV 0..180 HSV window in detector.py:_HSV_RANGES so the
+# mock color detector keeps firing on the "base" parts of each type.
+# Each part: kind, size (cylinder: r,hh | box: hx,hy,hz | sphere: r),
+# pos (x,y,z from ground), euler (optional, radians), role (base/accent1/
+# accent2), mass.
 WASTE_SPECS = {
-    "plastic_bottle": {"rgba": (0.05, 0.95, 0.35, 1.0), "kind": "cylinder", "radius": 0.032, "height": 0.18, "mass": 0.05},
-    "can": {"rgba": (0.92, 0.70, 0.08, 1.0), "kind": "cylinder", "radius": 0.033, "height": 0.11, "mass": 0.04},
-    "plastic_bag": {"rgba": (0.88, 0.18, 0.72, 1.0), "kind": "box", "size": (0.12, 0.09, 0.04), "mass": 0.02},
-    "cardboard": {"rgba": (0.72, 0.50, 0.22, 1.0), "kind": "box", "size": (0.16, 0.12, 0.03), "mass": 0.06},
-    "food_container": {"rgba": (0.12, 0.42, 0.85, 1.0), "kind": "box", "size": (0.12, 0.09, 0.06), "mass": 0.05},
+    "plastic_bottle": {
+        "hue_range": (0.22, 0.44),
+        "parts": [
+            {"role": "base", "kind": "cylinder", "size": (0.032, 0.065), "pos": (0, 0, 0.085), "mass": 0.030},
+            {"role": "base", "kind": "cylinder", "size": (0.024, 0.014), "pos": (0, 0, 0.164), "mass": 0.006},
+            {"role": "accent2", "kind": "cylinder", "size": (0.033, 0.020), "pos": (0, 0, 0.095), "mass": 0.004},
+            {"role": "accent1", "kind": "cylinder", "size": (0.011, 0.016), "pos": (0, 0, 0.194), "mass": 0.004},
+            {"role": "accent1", "kind": "cylinder", "size": (0.014, 0.010), "pos": (0, 0, 0.220), "mass": 0.003},
+        ],
+    },
+    "can": {
+        "hue_range": (0.075, 0.165),
+        "parts": [
+            {"role": "base", "kind": "cylinder", "size": (0.033, 0.050), "pos": (0, 0, 0.070), "mass": 0.028},
+            {"role": "accent2", "kind": "cylinder", "size": (0.034, 0.022), "pos": (0, 0, 0.070), "mass": 0.006},
+            {"role": "accent1", "kind": "cylinder", "size": (0.036, 0.006), "pos": (0, 0, 0.126), "mass": 0.004},
+            {"role": "accent1", "kind": "box", "size": (0.006, 0.010, 0.004), "pos": (0, 0, 0.136), "mass": 0.001},
+        ],
+    },
+    "plastic_bag": {
+        "hue_range": (0.76, 0.96),
+        "parts": [
+            {"role": "base", "kind": "box", "size": (0.045, 0.035, 0.020), "pos": (0.00, 0.00, 0.040), "mass": 0.008},
+            {"role": "base", "kind": "box", "size": (0.030, 0.040, 0.018), "pos": (0.028, -0.016, 0.048), "euler": (0, 0, 0.6), "mass": 0.006},
+            {"role": "base", "kind": "box", "size": (0.035, 0.022, 0.016), "pos": (-0.022, 0.020, 0.036), "euler": (0, 0, -0.4), "mass": 0.004},
+            {"role": "base", "kind": "box", "size": (0.020, 0.028, 0.014), "pos": (0.010, 0.032, 0.034), "euler": (0.3, 0, 1.0), "mass": 0.002},
+        ],
+    },
+    "cardboard": {
+        "hue_range": (0.03, 0.12),
+        "parts": [
+            {"role": "base", "kind": "box", "size": (0.075, 0.055, 0.018), "pos": (0, 0, 0.038), "mass": 0.042},
+            {"role": "base", "kind": "box", "size": (0.075, 0.030, 0.006), "pos": (0, 0.075, 0.075), "euler": (0.95, 0, 0), "mass": 0.006},
+            {"role": "base", "kind": "box", "size": (0.075, 0.030, 0.006), "pos": (0, -0.075, 0.075), "euler": (-0.95, 0, 0), "mass": 0.006},
+            {"role": "accent2", "kind": "box", "size": (0.010, 0.058, 0.003), "pos": (0, 0, 0.058), "mass": 0.003},
+        ],
+    },
+    "food_container": {
+        "hue_range": (0.52, 0.70),
+        "parts": [
+            {"role": "base", "kind": "box", "size": (0.060, 0.045, 0.025), "pos": (0, 0, 0.045), "mass": 0.035},
+            {"role": "accent1", "kind": "box", "size": (0.062, 0.047, 0.006), "pos": (0, 0.038, 0.078), "euler": (0.5, 0, 0), "mass": 0.010},
+            {"role": "accent2", "kind": "box", "size": (0.025, 0.018, 0.004), "pos": (0, 0, 0.074), "mass": 0.005},
+        ],
+    },
 }
+
+# Accent palette shared across types: a few plausible cap/label/lid/tape
+# colors, deliberately outside every WASTE_SPECS hue window so they read as
+# distinct trim rather than blending into the base part.
+ACCENT_PALETTE = [
+    (0.95, 0.95, 0.95, 1.0),   # white
+    (0.08, 0.08, 0.09, 1.0),   # black
+    (0.85, 0.10, 0.10, 1.0),   # red
+    (0.75, 0.76, 0.78, 1.0),   # silver
+    (0.10, 0.20, 0.65, 1.0),   # deep blue
+    (0.95, 0.80, 0.15, 1.0),   # yellow
+]
+
+
+def base_color(rng: np.random.Generator, waste_type: str) -> tuple[float, float, float, float]:
+    lo, hi = WASTE_SPECS[waste_type]["hue_range"]
+    hue = float(rng.uniform(lo, hi))
+    sat = float(rng.uniform(0.55, 0.95))
+    val = float(rng.uniform(0.55, 0.95))
+    r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
+    return (r, g, b, 1.0)
+
+
+def accent_color(rng: np.random.Generator) -> tuple[float, float, float, float]:
+    idx = int(rng.integers(0, len(ACCENT_PALETTE)))
+    return ACCENT_PALETTE[idx]
 
 
 @dataclass

@@ -33,6 +33,7 @@ def build_sim(cfg: dict, scenario: str = "multi", gui: bool | None = None, headl
         fovy=float(cfg["camera"]["fov_deg"]),
         timestep=float(cfg["simulator"]["timestep"]),
         decoys=decoys_spec,
+        seed=int(cfg["world"]["seed"]),
     )
     engine = Engine(
         xml,

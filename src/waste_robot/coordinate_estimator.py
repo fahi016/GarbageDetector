@@ -63,3 +63,46 @@ def raycast_fallback(engine, cam_pos, cam_target, max_dist=8.0) -> np.ndarray | 
     if d >= max_dist * 0.99:
         return None
     return np.asarray(cam_pos, dtype=np.float64) + direction / n * d
+
+
+def pixel_world_direction(frame: CameraFrame, u: int, v: int) -> np.ndarray:
+    """World-space unit ray direction from the camera through pixel (u, v)."""
+    fx = (frame.width / 2.0) / np.tan(np.deg2rad(frame.fov_deg) / 2.0)
+    fy = fx
+    ex = (u - frame.width / 2.0) / fx
+    ey = (v - frame.height / 2.0) / fy
+    eye_dir = np.array([ex, -ey, -1.0, 0.0], dtype=np.float64)  # w=0: direction, not a point
+    inv_view = np.linalg.inv(frame.view)
+    world_dir = (inv_view @ eye_dir)[:3]
+    n = np.linalg.norm(world_dir)
+    return world_dir / n if n > 1e-9 else world_dir
+
+
+def raycast_detection_target(engine, frame: CameraFrame, det: Detection, max_dist: float | None = None) -> dict | None:
+    """Cast a single simulator ray through the detection bbox center.
+
+    This is the "simulator-native mechanism" localization step: instead of
+    trusting a ground-truth object position, fire a ray along the camera's
+    real viewing direction for that pixel and see what it actually hits.
+    Accepts only `waste_*` bodies (real trash geometry); a `decoy_*` hit or a
+    miss means "reject" so callers can fall back to the depth estimate or
+    drop the detection.
+    """
+    u, v = bbox_center(det)
+    if not (0 <= u < frame.width and 0 <= v < frame.height):
+        return None
+    direction = pixel_world_direction(frame, u, v)
+    reach = float(max_dist if max_dist is not None else frame.far)
+    body_id, dist = engine.raycast(frame.camera_pos, direction, max_dist=reach)
+    if body_id is None or dist <= 0:
+        return None
+    name = str(engine.model.body(body_id).name)
+    if not name.startswith("waste_"):
+        return None
+    world_xyz = engine.data.xpos[body_id].copy()
+    return {
+        "body_id": body_id,
+        "body_name": name,
+        "distance": dist,
+        "world_xyz": (float(world_xyz[0]), float(world_xyz[1]), float(world_xyz[2])),
+    }

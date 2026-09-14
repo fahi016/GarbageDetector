@@ -47,20 +47,24 @@ Virtual environment (MuJoCo plaza)
         ↓
 Virtual camera (RGB-D on the mast)
         ↓
-WasteDetector.detect(image)     ← mock today, your model tomorrow
+Cheap local color trigger  ← "something's there" (also the whole 'mock' backend)
         ↓
-Coordinate estimator (bbox + depth → world XYZ)
+Snapshot → Gemini vision (garbage_detected / type / confidence / bbox)
+        ↓
+Coordinate estimator (bbox → camera raycast → world XYZ, depth as fallback)
         ↓
 Navigator (A* on static map + lidar avoidance)
         ↓
 Mobile base (cmd_vel → wheel velocities)
         ↓
-Arm controller (IK + gripper constraint)
+6-DOF arm (staged per-joint IK: align → reach → descend → fine-align → lift → deposit)
         ↓
 Onboard basket (physics drop)
 ```
 
-State machine: `SEARCHING → WASTE_DETECTED → NAVIGATING → POSITIONING → ARM_APPROACHING → GRASPING → LIFTING → MOVING_TO_BASKET → RELEASING → RETURNING_ARM → SEARCHING`
+State machine: `IDLE → PATROLLING → POTENTIAL_GARBAGE_FOUND → CAPTURING_IMAGE → GEMINI_ANALYSIS → APPROACHING_TARGET → ARM_POSITIONING → GRABBING → LIFTING → MOVING_TO_BIN → RELEASING → ARM_RESET → PATROLLING`
+
+The robot patrols a waypoint loop rather than sitting still; a cheap color-blob check gates when an (API-billed) Gemini vision call actually fires, rather than calling it every frame. See `waste_robot/gemini_detector.py` for the prompt and `waste_robot/arm.py` for the staged 6-DOF motion.
 
 ---
 
@@ -137,7 +141,11 @@ Do **not** replace the pipeline. Implement `detect(image)` and switch config.
 
 **Option A — Gemini vision (default)**
 
-Virtual camera snapshot → Gemini (trash / not trash + boxes). Requires `GEMINI_API_KEY` in `.env`.
+A cheap local color trigger flags "something's there," then a virtual-camera
+snapshot goes to Gemini, which returns structured JSON: `garbage_detected`,
+`garbage_type`, `confidence`, a fractional `bounding_box`, and a
+`description` (see `waste_robot/gemini_detector.py:GEMINI_PROMPT`). Requires
+`GEMINI_API_KEY` in `.env`.
 
 ```yaml
 detector:
@@ -195,9 +203,9 @@ CapstoneProject/
 |---|---|
 | Color mock detector | Your CNN/YOLO weights |
 | A* on a known obstacle map + lidar reflex | Nav2 + costmaps + AMCL |
-| MuJoCo Jacobian IK, linear joint interpolation | MoveIt 2 |
+| MuJoCo Jacobian IK, staged per-joint interpolation | MoveIt 2 |
 | Grasp = proximity + fixed constraint | Contact-rich grasp / suction |
-| Primitive-looking plaza | Photoreal Isaac/Gazebo meshes |
+| Procedural compound-geom trash (no mesh assets) | Photoreal Isaac/Gazebo meshes |
 | In-process `Bus` | `rclpy` publishers |
 
 These are replacement boundaries, not a rewrite.

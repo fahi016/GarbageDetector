@@ -43,31 +43,155 @@ class ArmController:
         pos, mat = self.engine.site_pose(self.ee_site)
         return pos, mat
 
-    def _ik(self, xyz: np.ndarray) -> list[float] | None:
+    def _ik(self, xyz: np.ndarray, joint_mask: list[int] | None = None) -> list[float] | None:
+        """Jacobian IK. `joint_mask` restricts which of the 6 joints may move
+        (others stay frozen at their current value) — used for the wrist-only
+        fine-alignment pass. Returns the full 6-length joint solution.
+
+        IMPORTANT: this only *evaluates* candidate poses (via mj_forward,
+        kinematics-only) while searching -- it always restores the arm to
+        its pre-call pose before returning, so it never mutates live sim
+        state. Callers animate from the real current pose to the returned
+        solution; without this the arm would silently teleport to the goal
+        during the search itself, and any later interpolation would be a
+        no-op ("start" and "goal" already equal) -- exactly the invisible/
+        instant-snap motion this whole staged-motion system exists to avoid.
+        """
+        mask = list(joint_mask) if joint_mask is not None else list(range(len(self.joints)))
         target = np.asarray(xyz, dtype=np.float64)
+        original_q = self.current_q()
+        solved: list[float] | None = None
         for _ in range(int(self.cfg["ik_max_iterations"])):
             mujoco.mj_forward(self.model, self.data)
             pos = self.data.site_xpos[self.ee_site]
             err = target - pos
             if float(np.linalg.norm(err)) < 0.02:
-                return self.current_q()
+                solved = self.current_q()
+                break
             jacp = np.zeros((3, self.model.nv))
             mujoco.mj_jacSite(self.model, self.data, jacp, None, self.ee_site)
-            cols = [int(self.model.jnt_dofadr[j]) for j in self.joints]
+            cols_all = [int(self.model.jnt_dofadr[j]) for j in self.joints]
+            cols = [cols_all[i] for i in mask]
             jmat = jacp[:, cols]
             lam = 1e-3
             try:
                 dq = jmat.T @ np.linalg.solve(jmat @ jmat.T + lam * np.eye(3), 0.6 * err)
             except np.linalg.LinAlgError:
-                return None
+                solved = None
+                break
             dq = np.clip(dq, -0.2, 0.2)
             q = self.current_q()
-            q = [float(np.clip(qi + dqi, lo, hi)) for qi, dqi, lo, hi in zip(q, dq, self.lower, self.upper)]
+            for k, idx in enumerate(mask):
+                q[idx] = float(np.clip(q[idx] + dq[k], self.lower[idx], self.upper[idx]))
             self._hold_position(q)
+        else:
+            mujoco.mj_forward(self.model, self.data)
+            if float(np.linalg.norm(target - self.data.site_xpos[self.ee_site])) < 0.07:
+                solved = self.current_q()
+        self._hold_position(original_q)
         mujoco.mj_forward(self.model, self.data)
-        if float(np.linalg.norm(target - self.data.site_xpos[self.ee_site])) < 0.07:
-            return self.current_q()
-        return None
+        return solved
+
+    def move_joints_staged(
+        self,
+        target_q: list[float],
+        groups: list[list[int]],
+        steps_per_group: int = 28,
+        substeps: int = 4,
+    ) -> None:
+        """Move joints group-by-group so each group's motion is visually distinct.
+
+        Joints not in the active group hold their pre-group value while the
+        active group's joints interpolate smoothly to `target_q`. This is the
+        core of the "clearly 6-DOF, not one rigid blob" arm motion: the base
+        rotates, *then* the shoulder drops, *then* the elbow bends, etc.
+        """
+        current = np.array(self.current_q())
+        goal = np.array(target_q)
+        for group in groups:
+            group_start = current.copy()
+            for k in range(steps_per_group):
+                a = (k + 1) / steps_per_group
+                q = current.copy()
+                for idx in group:
+                    q[idx] = group_start[idx] * (1 - a) + goal[idx] * a
+                self._hold_position(q.tolist())
+                for _ in range(substeps):
+                    self.engine.step()
+            for idx in group:
+                current[idx] = goal[idx]
+
+    # -- Named 6-DOF pickup phases (each moves a distinct joint group) -------
+
+    def _base_bearing_q(self, target_xyz) -> float:
+        """Desired joint_1 angle to point the arm's waist at target_xyz.
+
+        A single revolute joint can't satisfy a full 3D position IK target
+        (that needs 3+ DOF), so aiming the base is a plain bearing
+        calculation, not an IK solve: angle from the (fixed-to-chassis) arm
+        base to the target, expressed relative to the chassis heading.
+        """
+        base_pos, _ = self.engine.body_pose("arm_base")
+        _, chassis_yaw = self.engine.base_pose()
+        dx = float(target_xyz[0]) - base_pos[0]
+        dy = float(target_xyz[1]) - base_pos[1]
+        desired = float(np.arctan2(dy, dx)) - chassis_yaw
+        desired = (desired + np.pi) % (2 * np.pi) - np.pi
+        return float(np.clip(desired, self.lower[0], self.upper[0]))
+
+    def stage_align_base(self, target_xyz) -> bool:
+        """Phase 1 (scan/align): rotate only the waist/base joint toward the target."""
+        q_goal = self.current_q()
+        q_goal[0] = self._base_bearing_q(target_xyz)
+        self.move_joints_staged(q_goal, groups=[[0]], steps_per_group=34)
+        return True
+
+    def stage_reach(self, pregrasp_xyz, grasp_xyz) -> bool:
+        """Phase 2 (reach): shoulder -> elbow -> wrist orientation -> descend onto the target.
+
+        Two full-IK solves, not one: first a safe hover pose above the
+        target (shoulder/elbow/forearm do the big motion), then the actual
+        grasp point (wrist pitch does the final descent). A single wrist-
+        only IK pass can't cover that descent -- of the 3 wrist joints, two
+        are roll axes through the end-effector site and barely move it, so
+        that step is reserved for small last-centimeter fine alignment.
+        """
+        q_hover = self._ik(pregrasp_xyz)
+        if q_hover is None:
+            return False
+        self.move_joints_staged(q_hover, groups=[[1], [2], [3, 4]], steps_per_group=24)
+        q_final = self._ik(grasp_xyz)
+        if q_final is None:
+            return False
+        self.move_joints_staged(q_final, groups=[[5], [1, 2]], steps_per_group=22)
+        return True
+
+    def stage_fine_align(self, target_xyz) -> bool:
+        """Phase 3 (fine alignment): small wrist-only correction onto the grasp point."""
+        q_goal = self._ik(target_xyz, joint_mask=[3, 4, 5])
+        if q_goal is None:
+            return False
+        self.move_joints_staged(q_goal, groups=[[3], [4], [5]], steps_per_group=16)
+        return True
+
+    def stage_lift(self, lift_xyz) -> bool:
+        """Phase 5 (lift): wrist up, retract elbow, raise shoulder."""
+        q_goal = self._ik(lift_xyz)
+        if q_goal is None:
+            return False
+        self.move_joints_staged(q_goal, groups=[[3, 4, 5], [2], [1]], steps_per_group=24)
+        return True
+
+    def stage_deposit(self, basket_xyz) -> bool:
+        """Phase 6 (deposit): rotate base toward the bin, then swing the arm over it."""
+        q_base = self.current_q()
+        q_base[0] = self._base_bearing_q(basket_xyz)
+        self.move_joints_staged(q_base, groups=[[0]], steps_per_group=28)
+        q_goal = self._ik(basket_xyz)
+        if q_goal is None:
+            return False
+        self.move_joints_staged(q_goal, groups=[[1, 2], [3, 4], [5]], steps_per_group=24)
+        return True
 
     def move_ee(self, xyz, orn=None, timeout: float | None = None) -> bool:
         q_goal = self._ik(np.asarray(xyz, dtype=np.float64))

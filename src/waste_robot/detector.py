@@ -29,6 +29,30 @@ class WasteDetector(ABC):
     def detect(self, image: np.ndarray) -> list[Detection]:
         """image: RGB HxWx3 uint8 -> list of detections."""
 
+    def quick_scan(self, image: np.ndarray) -> list[Detection]:
+        """Cheap 'is anything potentially trash-like here' check used during
+        patrol. Backends that are already cheap (mock/existing/oracle) just
+        reuse detect(); GeminiWasteDetector overrides this to run its local
+        trigger instead of calling the API on every frame."""
+        return self.detect(image)
+
+    def confirm(self, image: np.ndarray) -> bool:
+        """Start (or, for synchronous backends, simply record) a
+        confirmation pass on `image`. Returns True if the mission should
+        move on to polling for a result. Synchronous backends (mock/
+        existing/oracle) always confirm immediately; GeminiWasteDetector
+        overrides this with a real async, rate-limited API call."""
+        self._confirm_image = image
+        return True
+
+    def poll(self) -> tuple[bool, list[Detection]]:
+        """Non-blocking (done, detections). Synchronous backends are always
+        'done' on the first poll, since confirm() already did the work."""
+        image = getattr(self, "_confirm_image", None)
+        if image is None:
+            return True, []
+        return True, self.detect(image)
+
 
 # Distinct HSV windows for the colored primitive waste objects.
 _HSV_RANGES = {
@@ -56,6 +80,10 @@ class MockColorDetector(WasteDetector):
             for lo, hi in ranges:
                 mask = cv2.bitwise_or(mask, cv2.inRange(hsv, np.array(lo), np.array(hi)))
             mask = cv2.medianBlur(mask, 5)
+            # Erode away thin/speckled mask noise (e.g. lit blades of grass
+            # that briefly cross a color threshold) so only solid, compact
+            # color regions -- like an actual waste item -- form contours.
+            mask = cv2.erode(mask, np.ones((3, 3), np.uint8), iterations=2)
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             for c in contours:
                 area = cv2.contourArea(c)

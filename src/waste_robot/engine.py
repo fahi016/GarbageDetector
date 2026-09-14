@@ -231,6 +231,31 @@ class Engine:
                 hits[i] = float(min(dist[i], max_range))
         return hits
 
+    def raycast(self, pos: np.ndarray, direction: np.ndarray, max_dist: float = 10.0) -> tuple[int | None, float]:
+        """Single ray (mj_ray) from pos along direction; returns (hit_body_id, distance)."""
+        n = np.linalg.norm(direction)
+        if n < 1e-9:
+            return None, -1.0
+        vec = (np.asarray(direction, dtype=np.float64) / n) * max_dist
+        geomid = np.full(1, -1, dtype=np.int32)
+        geomgroup = np.ones(6, dtype=np.uint8)
+        dist = mujoco.mj_ray(
+            self.model,
+            self.data,
+            np.asarray(pos, dtype=np.float64),
+            vec,
+            geomgroup,
+            True,
+            self.robot_body,
+            geomid,
+        )
+        if dist < 0 or geomid[0] < 0:
+            return None, -1.0
+        # mj_ray returns x where hit = pos + x*vec, and |vec| == max_dist here,
+        # so the real-world distance in meters is x * max_dist.
+        body_id = int(self.model.geom_bodyid[geomid[0]])
+        return body_id, float(dist * max_dist)
+
     def contacts_with_static(self) -> int:
         n = 0
         for i in range(self.data.ncon):
