@@ -58,7 +58,17 @@ def build_sim(cfg: dict, scenario: str = "multi", gui: bool | None = None, headl
         decoys.append(item)
 
     base = MobileBase(engine, cfg["robot"])
-    arm = ArmController(engine, robot, cfg["arm"])
+    bridge = None
+    serial_port = cfg["arm"].get("serial_port")
+    if serial_port:
+        from waste_robot.arm_serial_bridge import ArmSerialBridge
+
+        bridge = ArmSerialBridge(
+            serial_port,
+            baud=int(cfg["arm"].get("serial_baud", 115200)),
+            max_hz=float(cfg["arm"].get("serial_max_hz", 50)),
+        )
+    arm = ArmController(engine, robot, cfg["arm"], bridge=bridge)
     camera = VirtualCamera(engine, cfg["camera"])
     force_low = scenario == "false_detection"
     detector = build_detector(cfg["detector"], force_low_confidence=force_low)

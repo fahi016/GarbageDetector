@@ -9,7 +9,7 @@ from waste_robot.engine import Engine
 
 
 class ArmController:
-    def __init__(self, engine: Engine, robot, cfg: dict):
+    def __init__(self, engine: Engine, robot, cfg: dict, bridge=None):
         self.engine = engine
         self.model = engine.model
         self.data = engine.data
@@ -24,17 +24,25 @@ class ArmController:
         self.act = [engine.actuator_id(f"act_joint_{k}") for k in range(1, 7)]
         self.act_fl = engine.actuator_id("act_finger_left_joint")
         self.act_fr = engine.actuator_id("act_finger_right_joint")
+        # Optional ArmSerialBridge: when set, every joint/gripper update
+        # below is also streamed to the real ESP32-driven arm.
+        self.bridge = bridge
+        self._gripper_opening = float(cfg["gripper_open"])
         self._hold_position(self.home)
         self.open_gripper()
         engine.forward()
 
     def _hold_position(self, q: list[float]) -> None:
+        applied = []
         for j, qi, act in zip(self.joints, q, self.act):
             adr = int(self.model.jnt_qposadr[j])
             lo, hi = self.model.jnt_range[j]
             qi = float(np.clip(qi, lo, hi))
             self.data.qpos[adr] = qi
             self.data.ctrl[act] = qi
+            applied.append(qi)
+        if self.bridge is not None:
+            self.bridge.send(applied, self._gripper_opening)
 
     def current_q(self) -> list[float]:
         return [float(self.data.qpos[int(self.model.jnt_qposadr[j])]) for j in self.joints]
@@ -233,6 +241,9 @@ class ArmController:
         self.data.ctrl[self.act_fr] = pos
         self.data.qpos[int(self.model.jnt_qposadr[self.fingers["finger_left_joint"]])] = pos
         self.data.qpos[int(self.model.jnt_qposadr[self.fingers["finger_right_joint"]])] = pos
+        self._gripper_opening = pos
+        if self.bridge is not None:
+            self.bridge.send(self.current_q(), pos)
 
     def try_attach(self, waste_body_ids: list[int]) -> int | None:
         if self.engine.held_body is not None:

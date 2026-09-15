@@ -79,6 +79,8 @@ def main() -> int:
         print(f"Saved metrics to {out}")
         mission.dashboard.close()
         ctx.engine.close()
+        if getattr(mission.arm, "bridge", None) is not None:
+            mission.arm.bridge.close()
     return 0
 
 

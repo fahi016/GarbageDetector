@@ -43,6 +43,9 @@ arm:
   gripper_open: 0.04
   gripper_closed: 0.0
   grasp_attach_distance: 0.22
+  serial_port: null           # e.g. "COM6" to stream joint commands to the real ESP32 arm; null disables
+  serial_baud: 115200
+  serial_max_hz: 50           # cap on how often frames are sent to the ESP32
 
 detector:
   backend: gemini              # gemini | mock | existing | oracle
